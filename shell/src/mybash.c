@@ -17,65 +17,69 @@
 #include <errno.h>
 #include <fcntl.h>
 #include "parser.h"
+#include "builtin.h"
+#include "mybash.h"
+#include "job.h"
+#include "uthash.h"
 
-void init();
-char* getUserCommand();
-//void execBuiltInCommand(struct CommandData);
-int builtinCD(char **);
-void executeCommand(struct CommandData);
-void launchProcess(struct Command, int, int, int);
+struct Assignment *assignments = NULL;
 
-
-int builtinCD(char ** args) {
-    if (args == NULL || sizeof(args) ==0) {
-        // go to HOME
-    } else {
-        char *dir = args[0];
-        if (chdir(dir) != 0) {
-            perror("mybash");
-            exit(1);
-        }
-    }
-
-    return 1;
-}
+char *envvars[] = {
+    "PATH",
+    "HOME",
+    "DEBUG"
+};
 
 char *builtincmds[] = {
-    "cd"/*,
-    "export",
-    "set",
+    "cd",
     "pwd",
-    "export"*/
+    "set",
+    "export",
+    "exit"
 };
 
 int (*builtinfuncs[])(char **args) = {
     &builtinCD,
-
+    &builtinPWD,
+    &builtinSET,
+    &builtinEXPORT,
+    &builtinEXIT,
 };
 
 int main(int argc, char** argv)
 {
+    int status;
     while(1) {
+        status = 1;
         init();
-        char* cmd = getUserCommand();
 
-        if(cmd != NULL && strlen(cmd) != 0) {
-            struct CommandData cmdData;
-            int validCmd = ParseCommandLine(cmd, &cmdData);
-            if(validCmd) {
-                if(0)//BuiltInTest(cmdData) == 1 )
-                    //execBuiltInCommand(cmdData);
-                    printf("builtin test\n");
-                else{
-                    executeCommand(cmdData);
+        char *cmd = getUserCommand();
+
+        if (cmd != NULL && strlen(cmd) != 0) {
+            if (IsAssignment(cmd)) {
+                struct Assignment *assignment = (struct Assignment *)malloc(sizeof(struct Assignment));
+                int validAssignment = ParseAssignment(cmd, assignment);
+                if (validAssignment) {
+                    status = assignVar(assignment);
+                } else {
+                    fprintf(stderr, "Assignment parse error: invalid assignment format\n");
+                    status = 0;
                 }
             } else {
-                fprintf(stderr, "Cmd parse error: invalid command format\n");
-                exit(EXIT_FAILURE);
+                struct CommandData *cmdData = (struct CommandData *)malloc(sizeof(struct CommandData));
+                int validCmd = ParseCommandLine(cmd, cmdData);
+                if (validCmd) {
+                   status = executeCommand(cmdData);
+                } else {
+                    fprintf(stderr, "Cmd parse error: invalid command format\n");
+                    status = 0;
+                }
             }
-
         }
 
+        if (status == 0) {
+            fprintf(stderr, "Error in the execution\n");
+        }
     }
 }
 
@@ -92,15 +96,15 @@ void init() {
     }
 }
 
-#define COMMAND_BUFSIZE 128
 char* getUserCommand() {
     int position = 0;
-    char *buffer = malloc(sizeof(char) * COMMAND_BUFSIZE);
+    int bufsize = COMMAND_BUFSIZE;
+    char *buffer = malloc(sizeof(char) * bufsize);
     int c;
 
     if (!buffer) {
         fprintf(stderr, "cmd buffer: allocation error\n");
-        exit(EXIT_FAILURE);
+        return NULL;
     }
 
     while (1) {
@@ -116,102 +120,86 @@ char* getUserCommand() {
         }
         position++;
 
-        // Exceeds maximum length.
-        if (position >= COMMAND_BUFSIZE) {
-            fprintf(stderr, "Exceed cmd maximum length: 128 chars\n");
-            exit(EXIT_FAILURE);
+        if (position >= bufsize) {
+          bufsize += COMMAND_BUFSIZE;
+          buffer = realloc(buffer, bufsize);
+          if (!buffer) {
+            fprintf(stderr, "cmd buffer: allocation error\n");
+            return NULL;
+          }
         }
     }
 
 }
 
-#define PIPERD 0
-#define PIPEWR 1
-void executeCommand(struct CommandData cmdData) {
-    /*The steps for executing the command are:
-    (1) Redirect Input/Output for the command, if necessary
-    (2) Create a new process which is a copy of the calling process (-> fork()
-            system call)
-    (3) Child process will run a new program (-> one of the exec() system calls)
-    (4) if( BackgroundOption(CommandStructure) == 0 )
-        the parent shell will wait(), otherwise it will continue the while loop*/
-    struct Command *commands = cmdData.TheCommands;
-    int background = cmdData.background;
-    printf("background: %d\n", background);
-
-    if (cmdData.numcommands > 1) {
-        if (cmdData.numcommands == 2) {
-            int pipefd[2];
-            pipe(pipefd);
-
-            launchProcess(commands[0], STDIN_FILENO, pipefd[PIPEWR], background);
-
-            int outfilefd = STDOUT_FILENO;
-            if (cmdData.outfile != NULL) {
-                outfilefd = open(cmdData.outfile, O_WRONLY, 0);
+int assignVar(struct Assignment *assignment) {
+    for(int i=0; i<sizeof(envvars)/sizeof(char *); i++) {
+        if (strcmp(assignment->varname, envvars[i]) == 0) {
+            if (setenv(assignment->varname, assignment->value, 1) == -1) {
+                fprintf(stderr, "error: set env\n");
+                return 0;
             }
-            launchProcess(commands[1], pipefd[PIPERD], outfilefd, background);
-        } else {
-            // more than 2 commands are not supported
+            return 1;
         }
-    } else {
+    }
+
+    HASH_ADD_STR(assignments, varname, assignment);
+    return 1;
+}
+
+int executeCommand(struct CommandData *cmdData) {
+    int status;
+
+    if (debug()) {
+        printDebugInfo(cmdData);
+    }
+
+    if (cmdData->numcommands == 1) {
+        struct Command *commands = cmdData->TheCommands;
         for(int i=0; i<sizeof(builtincmds)/sizeof(char *); i++) {
             if (strcmp(commands[0].command, builtincmds[i]) == 0) {
-                (builtinfuncs[i])(commands[0].args);
-                return;
+                status = (builtinfuncs[i])(commands[0].args);
+                return status;
             }
         }
+    }
+    status = exeExtCmd(cmdData);
+    return status;
+}
 
-        int infilefd = STDIN_FILENO, outfilefd = STDOUT_FILENO;
-        if (cmdData.infile != NULL) {
-            printf("input file: %s\n", cmdData.infile);
-            infilefd = open(cmdData.infile, O_RDONLY, 0);
-            printf("input file fd: %d\n", infilefd);
-        }
-        if (cmdData.outfile != NULL) {
-            printf("output file: %s\n", cmdData.outfile);
-            mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-            outfilefd = open(cmdData.outfile, O_WRONLY | O_CREAT | O_TRUNC, mode);
-            printf("output file fd: %d\n", outfilefd);
-        }
+int debug() {
+    char * debug = getenv("DEBUG");
 
-        launchProcess(commands[0], infilefd, outfilefd, background);
+    if (debug != NULL) {
+        if (strcmp(debug, "yes") == 0) {
+            return 1;
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
     }
 }
 
-void launchProcess(struct Command cmd, int infilefd, int outfilefd, int background) {
-    int pid = fork();
-    if (pid == 0) {
-        if (infilefd != STDIN_FILENO){
-            dup2 (infilefd, STDIN_FILENO);
-            close(infilefd);
-        }
-        if (outfilefd != STDOUT_FILENO){
-            dup2 (outfilefd, STDOUT_FILENO);
-            close(outfilefd);
-        }
+void printDebugInfo(struct CommandData *cmdData) {
+    printf("\n");
+    printf("DEBUG OUTPUT: \n");
+    printf("--------------------------\n");
+    printf("DEBUG: Number of simple commands: %d\n", cmdData->numcommands);
+    struct Command *commands = cmdData->TheCommands;
 
-        char *cmdargv[12];
-        cmdargv[0] = cmd.command;
-        for(int i=1; i<sizeof(cmdargv)/sizeof(char *); i++) {
-            cmdargv[i] = cmd.args[i-1];
-        }
-        execvp(cmd.command, cmdargv);
+    for(int i=0; i<cmdData->numcommands; i++) {
+        struct Command cmd = commands[i];
 
-        perror("execvp");
-        exit(1);
-    } else {
-        if (infilefd != STDIN_FILENO) {
-            close(infilefd);
-        }
-        if (outfilefd != STDOUT_FILENO) {
-            close(outfilefd);
-        }
-
-        int status;
-        if (!background) {
-            printf("waiting...\n");
-            waitpid (pid, &status, WUNTRACED);
+        printf("DEBUG: command%d : %s\n", (i+1), cmd.command);
+        for(int j=0; j<cmd.numargs; j++) {
+            printf("DEBUG: arg[%d] : %s\n", j, cmd.args[j]);
         }
     }
+
+    printf("DEBUG: Input file : %s\n", cmdData->infile);
+    printf("DEBUG: Output file : %s\n", cmdData->outfile);
+    printf("DEBUG: Background option : %s\n", cmdData->background? "ON" : "OFF");
+    printf("--------------------------\n");
+    printf("\n");
 }

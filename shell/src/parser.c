@@ -12,10 +12,32 @@
  */
 
 
-#include "../src/parser.h"
+#include "parser.h"
 
 #include <stdio.h>
 #include <string.h> /* for strdup */
+
+int IsAssignment(char *line)
+{
+    int i = 0;
+    while (line[i] != '\0' && line[i] != '\n') {
+        if (line[i] == '=') {
+            return 1;
+        }
+        i++;
+    }
+
+    return 0;
+}
+
+static int IsValidAssignmentChar(char c)
+{
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    if (c == '.' || c == '_' || c == '/' || c == '-' || c == ':') return 1;
+    return 0;
+}
 
 static int IsAlphaNum(char c)  /* is this a valid char for a pathname or filename? */
 {
@@ -46,26 +68,26 @@ static int CopyWord(char *token, struct CommandData *data, int *state)
              /* this is one of the ugliest lines of code that I have ever written */
              data->TheCommands[data->numcommands].numargs++;
              if (data->TheCommands[data->numcommands].numargs > 10) {
-		 fprintf(stderr,"Error, too many arguments\n");
+                 fprintf(stderr,"Error, too many arguments\n");
                  return 0;
-	      }
+             }
               return 1;
         case INFILE: 
              if (data->infile != NULL) {
                  fprintf(stderr,"Error, stdin redirected twice\n");
                  return 0;
-	     }
-	     data->infile = strdup(token);
+             }
+             data->infile = strdup(token);
              *state = UNDEF;
              return 1;
         case OUTFILE: 
              if (data->outfile != NULL) {
                  fprintf(stderr,"Error, stdout is redirected twice\n");
                  return 0;
-	     }
-	     data->outfile = strdup(token);
+             }
+             data->outfile = strdup(token);
              *state = UNDEF;
-             return 1; 
+             return 1;
          case UNDEF:
              fprintf(stderr,"Error, bad syntax on the command line\n");
              return 0;
@@ -108,45 +130,45 @@ int ParseCommandLine(char *line, struct CommandData *data)
     while (line[i] != '\0' && line[i] != '\n') {
         if (IsAlphaNum(line[i])) {
             if (inaword) {
-	        token[j++]=line[i];
+                token[j++]=line[i];
             }
             else { /* starting a new word */
-	        j = 0;
+                j = 0;
                 token[j++] = line[i];
                 inaword = 1;
             }
         }
         else {  /* not an alphanumeric character */
             if (inaword) { /* we have found the end of a token */
-	        token[j]='\0';
+                token[j]='\0';
                 inaword = 0;
                 if (CopyWord(token,data,&state)==0)
-	             return 0;
-	     }
+                    return 0;
+            }
                      
             switch (line[i]) {
                 case ' ': 
                     break;
-	        case '>': 
+                case '>':
                     if (state == OUTFILE || state == INFILE || state == COMMAND) {
                         fprintf(stderr, "Error, bad syntax on the command line\n");
                         return 0;
-	            }
+                    }
                     state = OUTFILE;
-	            break;
+                    break;
                 case '<': 
                     if (state == OUTFILE || state == INFILE || state == COMMAND) {
                         fprintf(stderr, "Error, bad syntax on the command line\n");
                         return 0;
-	            }
+                    }
                     state = INFILE;
-	            break;
-	        case '|':
+                    break;
+                case '|':
                   if (state == COMMAND || state == INFILE || state == OUTFILE) {
                         fprintf(stderr, "Error, bad syntax on the command line\n");
                         return 0;
-	            }
-		  data->numcommands++;
+                  }
+                  data->numcommands++;
                   state = COMMAND;
                   data->TheCommands[data->numcommands].command = NULL;
                   data->TheCommands[data->numcommands].numargs = 0;
@@ -156,7 +178,7 @@ int ParseCommandLine(char *line, struct CommandData *data)
                     if (state == OUTFILE || state == INFILE || state == COMMAND) {
                         fprintf(stderr, "Error, bad syntax on the command line\n");    
                         return 0;
-	            }
+                    }
                     data->background = 1;
                     break;
                 default : 
@@ -173,7 +195,7 @@ int ParseCommandLine(char *line, struct CommandData *data)
         token[j]='\0';
         if (CopyWord(token,data,&state)==0) {
             return 0;
-	}
+        }
     }
 
     /* do some final error checking */
@@ -195,6 +217,88 @@ int ParseCommandLine(char *line, struct CommandData *data)
         return 0;
     }
     data->numcommands++;
+    return 1;
+}
+
+static int CopyAssignment(char *token, struct Assignment *assignment, int *state)
+{
+    switch (*state) {
+        case VAR:
+            assignment->varname = strdup(token);
+            *state = EQUAL;
+            return 1;
+        case VALUE:
+            assignment->value = strdup(token);
+            return 1;
+         case UNDEF:
+             fprintf(stderr,"Error, bad syntax on the assignment\n");
+             return 0;
+    };
+    /* we should never get here */
+    fprintf(stderr,"Error in CopyAssignment\n");
+    return 0;
+}
+
+int ParseAssignment(char *line, struct Assignment *assignment)
+{
+    int i, j;
+    char token[256];
+    int inaword;
+    int state;
+
+    i=0;
+    j=0;
+    inaword = 0;
+    state = VAR;
+    assignment->varname = NULL;
+    assignment->value = NULL;
+
+    while (line[i] != '\0' && line[i] != '\n') {
+        if (IsValidAssignmentChar(line[i])) {
+            if (inaword) {
+                token[j++]=line[i];
+            }
+            else { /* starting a new word */
+                j = 0;
+                token[j++] = line[i];
+                inaword = 1;
+            }
+        } else {  /* not an alphanumeric character */
+            if (inaword) { /* we have found the end of a token */
+                token[j]='\0';
+                inaword = 0;
+                if (CopyAssignment(token, assignment, &state)==0)
+                    return 0;
+            }
+
+            if (line[i] == '=') {
+                if (state == VAR || state == VALUE) {
+                    fprintf(stderr, "Error, bad syntax on the assignment\n");
+                    return 0;
+                }
+                state = VALUE;
+            } else {
+                fprintf(stderr,"Error, invalid character on the assignment %c\n",line[i]);
+                return 0;
+            }
+        }
+
+        i++;
+    }
+
+    if (inaword) {
+        token[j]='\0';
+        if (CopyAssignment(token, assignment, &state)==0) {
+            return 0;
+        }
+    }
+
+    /* do some final error checking */
+    if (state == EQUAL) {
+        fprintf(stderr,"Error, no value for a variable\n");
+        return 0;
+    }
+
     return 1;
 }
 
